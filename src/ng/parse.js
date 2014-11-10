@@ -852,8 +852,7 @@ function setter(obj, path, setValue, fullExp) {
   return setValue;
 }
 
-var getterFnCacheDefault = createMap();
-var getterFnCacheExpensive = createMap();
+var getterFnCache = createMap();
 
 function isPossiblyDangerousMemberName(name) {
   return name == 'constructor';
@@ -864,7 +863,7 @@ function isPossiblyDangerousMemberName(name) {
  * - http://jsperf.com/angularjs-parse-getter/4
  * - http://jsperf.com/path-evaluation-simplified/7
  */
-function cspSafeGetterFn(key0, key1, key2, key3, key4, fullExp, expensiveChecks) {
+function cspSafeGetterFn(key0, key1, key2, key3, key4, fullExp) {
   ensureSafeMemberName(key0, fullExp);
   ensureSafeMemberName(key1, fullExp);
   ensureSafeMemberName(key2, fullExp);
@@ -873,11 +872,11 @@ function cspSafeGetterFn(key0, key1, key2, key3, key4, fullExp, expensiveChecks)
   var eso = function(o) {
     return ensureSafeObject(o, fullExp);
   };
-  var eso0 = (expensiveChecks || isPossiblyDangerousMemberName(key0)) ? eso : identity;
-  var eso1 = (expensiveChecks || isPossiblyDangerousMemberName(key1)) ? eso : identity;
-  var eso2 = (expensiveChecks || isPossiblyDangerousMemberName(key2)) ? eso : identity;
-  var eso3 = (expensiveChecks || isPossiblyDangerousMemberName(key3)) ? eso : identity;
-  var eso4 = (expensiveChecks || isPossiblyDangerousMemberName(key4)) ? eso : identity;
+  var eso0 = isPossiblyDangerousMemberName(key0) ? eso : identity;
+  var eso1 = isPossiblyDangerousMemberName(key1) ? eso : identity;
+  var eso2 = isPossiblyDangerousMemberName(key2) ? eso : identity;
+  var eso3 = isPossiblyDangerousMemberName(key3) ? eso : identity;
+  var eso4 = isPossiblyDangerousMemberName(key4) ? eso : identity;
 
   return function cspSafeGetter(scope, locals) {
     var pathVal = (locals && locals.hasOwnProperty(key0)) ? locals : scope;
@@ -912,11 +911,9 @@ function getterFnWithEnsureSafeObject(fn, fullExpression) {
 }
 
 function getterFn(path, options, fullExp) {
-  var expensiveChecks = options.expensiveChecks;
-  var getterFnCache = (expensiveChecks ? getterFnCacheExpensive : getterFnCacheDefault);
   var fn = getterFnCache[path];
-  if (fn) return fn;
 
+  if (fn) return fn;
 
   var pathKeys = path.split('.'),
       pathKeysLength = pathKeys.length;
@@ -924,13 +921,13 @@ function getterFn(path, options, fullExp) {
   // http://jsperf.com/angularjs-parse-getter/6
   if (options.csp) {
     if (pathKeysLength < 6) {
-      fn = cspSafeGetterFn(pathKeys[0], pathKeys[1], pathKeys[2], pathKeys[3], pathKeys[4], fullExp, expensiveChecks);
+      fn = cspSafeGetterFn(pathKeys[0], pathKeys[1], pathKeys[2], pathKeys[3], pathKeys[4], fullExp);
     } else {
       fn = function cspSafeGetter(scope, locals) {
         var i = 0, val;
         do {
           val = cspSafeGetterFn(pathKeys[i++], pathKeys[i++], pathKeys[i++], pathKeys[i++],
-                                pathKeys[i++], fullExp, expensiveChecks)(scope, locals);
+                                pathKeys[i++], fullExp)(scope, locals);
 
           locals = undefined; // clear after first iteration
           scope = val;
@@ -940,10 +937,7 @@ function getterFn(path, options, fullExp) {
     }
   } else {
     var code = '';
-    if (expensiveChecks) {
-      code += 's = eso(s, fe);\nl = eso(l, fe);\n';
-    }
-    var needsEnsureSafeObject = expensiveChecks;
+    var needsEnsureSafeObject = false;
     forEach(pathKeys, function(key, index) {
       ensureSafeMemberName(key, fullExp);
       var lookupJs = (index
@@ -951,7 +945,7 @@ function getterFn(path, options, fullExp) {
                       ? 's'
                       // but if we are first then we check locals first, and if so read it first
                       : '((l&&l.hasOwnProperty("' + key + '"))?l:s)') + '.' + key;
-      if (expensiveChecks || isPossiblyDangerousMemberName(key)) {
+      if (isPossiblyDangerousMemberName(key)) {
         lookupJs = 'eso(' + lookupJs + ', fe)';
         needsEnsureSafeObject = true;
       }
@@ -1036,20 +1030,15 @@ function getValueOf(value) {
  *  service.
  */
 function $ParseProvider() {
-  var cacheDefault = createMap();
-  var cacheExpensive = createMap();
+  var cache = createMap();
 
+  var $parseOptions = {
+    csp: false
+  };
 
 
   this.$get = ['$filter', '$sniffer', function($filter, $sniffer) {
-    var $parseOptions = {
-          csp: $sniffer.csp,
-          expensiveChecks: false
-        },
-        $parseOptionsExpensive = {
-          csp: $sniffer.csp,
-          expensiveChecks: true
-        };
+    $parseOptions.csp = $sniffer.csp;
 
     function wrapSharedExpression(exp) {
       var wrapped = exp;
@@ -1066,14 +1055,13 @@ function $ParseProvider() {
       return wrapped;
     }
 
-    return function $parse(exp, interceptorFn, expensiveChecks) {
+    return function $parse(exp, interceptorFn) {
       var parsedExpression, oneTime, cacheKey;
 
       switch (typeof exp) {
         case 'string':
           cacheKey = exp = exp.trim();
 
-          var cache = (expensiveChecks ? cacheExpensive : cacheDefault);
           parsedExpression = cache[cacheKey];
 
           if (!parsedExpression) {
@@ -1082,9 +1070,8 @@ function $ParseProvider() {
               exp = exp.substring(2);
             }
 
-            var parseOptions = expensiveChecks ? $parseOptionsExpensive : $parseOptions;
-            var lexer = new Lexer(parseOptions);
-            var parser = new Parser(lexer, $filter, parseOptions);
+            var lexer = new Lexer($parseOptions);
+            var parser = new Parser(lexer, $filter, $parseOptions);
             parsedExpression = parser.parse(exp);
 
             if (parsedExpression.constant) {
